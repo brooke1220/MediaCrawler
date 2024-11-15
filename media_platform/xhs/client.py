@@ -1,3 +1,14 @@
+# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：  
+# 1. 不得用于任何商业用途。  
+# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。  
+# 3. 不得进行大规模爬取或对平台造成运营干扰。  
+# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。   
+# 5. 不得用于任何非法或不当的用途。
+#   
+# 详细许可条款请参阅项目根目录下的LICENSE文件。  
+# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。  
+
+
 import asyncio
 import json
 import re
@@ -6,10 +17,12 @@ from urllib.parse import urlencode
 
 import httpx
 from playwright.async_api import BrowserContext, Page
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_result
 
 import config
 from base.base_crawler import AbstractApiClient
 from tools import utils
+from html import unescape
 
 from .exception import DataFetchError, IPBlockError
 from .field import SearchNoteType, SearchSortType
@@ -66,6 +79,7 @@ class XiaoHongShuClient(AbstractApiClient):
         self.headers.update(headers)
         return self.headers
 
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
     async def request(self, method, url, **kwargs) -> Union[str, Any]:
         """
         封装httpx的公共请求方法，对请求响应做一些处理
@@ -86,9 +100,15 @@ class XiaoHongShuClient(AbstractApiClient):
                 **kwargs
             )
 
+        if response.status_code == 471 or response.status_code == 461:
+            # someday someone maybe will bypass captcha
+            verify_type = response.headers['Verifytype']
+            verify_uuid = response.headers['Verifyuuid']
+            raise Exception(
+                f"出现验证码，请求失败，Verifytype: {verify_type}，Verifyuuid: {verify_uuid}, Response: {response}")
+
         if return_response:
             return response.text
-
         data: Dict = response.json()
         if data["success"]:
             return data.get("data", data.get("success", {}))
@@ -114,7 +134,7 @@ class XiaoHongShuClient(AbstractApiClient):
         headers = await self._pre_headers(final_uri)
         return await self.request(method="GET", url=f"{self._host}{final_uri}", headers=headers)
 
-    async def post(self, uri: str, data: dict) -> Dict:
+    async def post(self, uri: str, data: dict, **kwargs) -> Dict:
         """
         POST请求，对请求头签名
         Args:
@@ -127,7 +147,7 @@ class XiaoHongShuClient(AbstractApiClient):
         headers = await self._pre_headers(uri, data)
         json_str = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
         return await self.request(method="POST", url=f"{self._host}{uri}",
-                                  data=json_str, headers=headers)
+                                  data=json_str, headers=headers, **kwargs)
 
     async def get_note_media(self, url: str) -> Union[bytes, None]:
         async with httpx.AsyncClient(proxies=self.proxies) as client:
@@ -171,6 +191,7 @@ class XiaoHongShuClient(AbstractApiClient):
 
     async def get_note_by_keyword(
             self, keyword: str,
+            search_id: str = get_search_id(),
             page: int = 1, page_size: int = 20,
             sort: SearchSortType = SearchSortType.GENERAL,
             note_type: SearchNoteType = SearchNoteType.ALL
@@ -192,7 +213,7 @@ class XiaoHongShuClient(AbstractApiClient):
             "keyword": keyword,
             "page": page,
             "page_size": page_size,
-            "search_id": get_search_id(),
+            "search_id": search_id,
             "sort": sort.value,
             "note_type": note_type.value
         }
@@ -269,21 +290,22 @@ class XiaoHongShuClient(AbstractApiClient):
         return await self.get(uri, params)
 
     async def get_note_all_comments(self, note_id: str, crawl_interval: float = 1.0,
-                                    callback: Optional[Callable] = None) -> List[Dict]:
+                                    callback: Optional[Callable] = None,
+                                    max_count: int = 10) -> List[Dict]:
         """
         获取指定笔记下的所有一级评论，该方法会一直查找一个帖子下的所有评论信息
         Args:
             note_id: 笔记ID
             crawl_interval: 爬取一次笔记的延迟单位（秒）
             callback: 一次笔记爬取结束后
-
+            max_count: 一次笔记爬取的最大评论数量
         Returns:
 
         """
         result = []
         comments_has_more = True
         comments_cursor = ""
-        while comments_has_more:
+        while comments_has_more and len(result) < max_count:
             comments_res = await self.get_note_comments(note_id, comments_cursor)
             comments_has_more = comments_res.get("has_more", False)
             comments_cursor = comments_res.get("cursor", "")
@@ -292,6 +314,8 @@ class XiaoHongShuClient(AbstractApiClient):
                     f"[XiaoHongShuClient.get_note_all_comments] No 'comments' key found in response: {comments_res}")
                 break
             comments = comments_res["comments"]
+            if len(result) + len(comments) > max_count:
+                comments = comments[:max_count - len(result)]
             if callback:
                 await callback(note_id, comments)
             await asyncio.sleep(crawl_interval)
@@ -425,3 +449,101 @@ class XiaoHongShuClient(AbstractApiClient):
             await asyncio.sleep(crawl_interval)
             result.extend(notes)
         return result
+
+    async def get_note_short_url(self, note_id: str) -> Dict:
+        """
+        获取笔记的短链接
+        Args:
+            note_id: 笔记ID
+
+        Returns:
+
+        """
+        uri = f"/api/sns/web/short_url"
+        data = {
+            "original_url": f"{self._domain}/discovery/item/{note_id}"
+        }
+        return await self.post(uri, data=data, return_response=True)
+
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
+    async def get_note_by_id_from_html(self, note_id: str, xsec_source: str, xsec_token: str) -> Dict:
+        """
+        通过解析网页版的笔记详情页HTML，获取笔记详情, 该接口可能会出现失败的情况，这里尝试重试3次
+        copy from https://github.com/ReaJason/xhs/blob/eb1c5a0213f6fbb592f0a2897ee552847c69ea2d/xhs/core.py#L217-L259
+        thanks for ReaJason
+        Args:
+            note_id:
+            xsec_source:
+            xsec_token:
+
+        Returns:
+
+        """
+        def camel_to_underscore(key):
+            return re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower()
+
+        def transform_json_keys(json_data):
+            data_dict = json.loads(json_data)
+            dict_new = {}
+            for key, value in data_dict.items():
+                new_key = camel_to_underscore(key)
+                if not value:
+                    dict_new[new_key] = value
+                elif isinstance(value, dict):
+                    dict_new[new_key] = transform_json_keys(json.dumps(value))
+                elif isinstance(value, list):
+                    dict_new[new_key] = [
+                        transform_json_keys(json.dumps(item))
+                        if (item and isinstance(item, dict))
+                        else item
+                        for item in value
+                    ]
+                else:
+                    dict_new[new_key] = value
+            return dict_new
+
+        url = "https://www.xiaohongshu.com/explore/" + note_id + f"?xsec_token={xsec_token}&xsec_source={xsec_source}"
+        html = await self.request(method="GET", url=url, return_response=True, headers=self.headers)
+        
+        def get_note_dict(html):
+            state = re.findall(r"window.__INITIAL_STATE__=({.*})</script>", html)[
+                0
+            ].replace("undefined", '""')
+
+            if state != "{}":
+                note_dict = transform_json_keys(state)
+                return note_dict["note"]["note_detail_map"][note_id]["note"]
+            return {}
+
+        try:
+            return get_note_dict(html)
+        except:
+            href = re.findall(r'href="(.*?)"', html)[0]
+            href = unescape(href)
+
+            utils.logger.info(
+                f"[XiaoHongShuClient.get_note_by_id_from_html] 出现验证码: {href}, 请手动验证"
+            )
+            await self.playwright_page.goto(href)
+            # 等待用户完成操作页面重定向
+            if await self.check_redirect():
+                utils.logger.info(
+                    f"[XiaoHongShuClient.get_note_by_id_from_html] 用户完成验证, 重定向到笔记详情页"
+                )
+                
+                html = await self.playwright_page.content()
+                return get_note_dict(html)
+            else:
+                raise DataFetchError(html)
+
+    @retry(
+        stop=stop_after_attempt(100),
+        wait=wait_fixed(5),
+        retry=retry_if_result(lambda value: value is False),
+    )
+    async def check_redirect(self):
+        url = self.playwright_page.url
+        if url.startswith("https://www.xiaohongshu.com/explore"):
+            return True
+        return False
+

@@ -1,3 +1,14 @@
+# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：  
+# 1. 不得用于任何商业用途。  
+# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。  
+# 3. 不得进行大规模爬取或对平台造成运营干扰。  
+# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。   
+# 5. 不得用于任何非法或不当的用途。
+#   
+# 详细许可条款请参阅项目根目录下的LICENSE文件。  
+# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。  
+
+
 # -*- coding: utf-8 -*-
 # @Author  : relakkes@gmail.com
 # @Time    : 2024/1/14 17:34
@@ -5,6 +16,7 @@
 from typing import List
 
 import config
+from var import source_keyword_var
 
 from . import xhs_store_impl
 from .xhs_store_image import *
@@ -27,6 +39,14 @@ class XhsStoreFactory:
 
 
 def get_video_url_arr(note_item: Dict) -> List:
+    """
+    获取视频url数组
+    Args:
+        note_item:
+
+    Returns:
+
+    """
     if note_item.get('type') != 'video':
         return []
 
@@ -46,6 +66,14 @@ def get_video_url_arr(note_item: Dict) -> List:
 
 
 async def update_xhs_note(note_item: Dict):
+    """
+    更新小红书笔记
+    Args:
+        note_item:
+
+    Returns:
+
+    """
     note_id = note_item.get("note_id")
     user_info = note_item.get("user", {})
     interact_info = note_item.get("interact_info", {})
@@ -78,12 +106,22 @@ async def update_xhs_note(note_item: Dict):
         "tag_list": ','.join([tag.get('name', '') for tag in tag_list if tag.get('type') == 'topic']),
         "last_modify_ts": utils.get_current_timestamp(),
         "note_url": f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token={note_item.get('xsec_token')}&xsec_source=pc_search",
+        "source_keyword": source_keyword_var.get(),
     }
     utils.logger.info(f"[store.xhs.update_xhs_note] xhs note: {local_db_item}")
     await XhsStoreFactory.create_store().store_content(local_db_item)
 
 
 async def batch_update_xhs_note_comments(note_id: str, comments: List[Dict]):
+    """
+    批量更新小红书笔记评论
+    Args:
+        note_id:
+        comments:
+
+    Returns:
+
+    """
     if not comments:
         return
     for comment_item in comments:
@@ -91,6 +129,15 @@ async def batch_update_xhs_note_comments(note_id: str, comments: List[Dict]):
 
 
 async def update_xhs_note_comment(note_id: str, comment_item: Dict):
+    """
+    更新小红书笔记评论
+    Args:
+        note_id:
+        comment_item:
+
+    Returns:
+
+    """
     user_info = comment_item.get("user_info", {})
     comment_id = comment_item.get("id")
     comment_pictures = [item.get("url_default", "") for item in comment_item.get("pictures", [])]
@@ -108,12 +155,22 @@ async def update_xhs_note_comment(note_id: str, comment_item: Dict):
         "pictures": ",".join(comment_pictures),
         "parent_comment_id": target_comment.get("id", 0),
         "last_modify_ts": utils.get_current_timestamp(),
+        "like_count": comment_item.get("like_count", 0),
     }
     utils.logger.info(f"[store.xhs.update_xhs_note_comment] xhs note comment:{local_db_item}")
     await XhsStoreFactory.create_store().store_comment(local_db_item)
 
 
 async def save_creator(user_id: str, creator: Dict):
+    """
+    保存小红书创作者
+    Args:
+        user_id:
+        creator:
+
+    Returns:
+
+    """
     user_info = creator.get('basicInfo', {})
 
     follows = 0
@@ -146,5 +203,16 @@ async def save_creator(user_id: str, creator: Dict):
 
 
 async def update_xhs_note_image(note_id, pic_content, extension_file_name):
+    """
+    更新小红书笔
+    Args:
+        note_id:
+        pic_content:
+        extension_file_name:
+
+    Returns:
+
+    """
+
     await XiaoHongShuImage().store_image(
         {"notice_id": note_id, "pic_content": pic_content, "extension_file_name": extension_file_name})
